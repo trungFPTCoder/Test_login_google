@@ -33,6 +33,8 @@ router.get('/google/login/web', authController.googleLogin);
 // URL callback mà Google sẽ gọi sau khi người dùng đăng nhập
 router.get('/google/callback', authController.googleCallback);
 
+router.post('/google/verify', authController.verifyGoogleToken);
+
 // (Tùy chọn) Lấy thông tin profile người dùng (yêu cầu token)
 // GET http://<your-ip>:8000/v1/auth/profile
 // router.get('/profile', authController.protect, authController.getProfile); // Tạm thời comment lại nếu chưa dùng đến

@@ -3,6 +3,9 @@ const jwt = require('jsonwebtoken');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const User = require('../models/User'); // Đảm bảo đường dẫn đúng
+const { OAuth2Client } = require('google-auth-library');
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID); 
+
 
 // --- Cấu hình Passport.js với chiến lược Google ---
 // Phần này sẽ được Node.js thực thi khi module được require, và nó sẽ cấu hình passport.
@@ -146,7 +149,70 @@ const authController = {
     userLogout: async (req, res) => {
         res.clearCookie('refreshToken');
         res.status(200).json("Logged out successfully!");
-    }
+    },
+    // ✅ HÀM MỚI: XÁC THỰC ID TOKEN TỪ MOBILE APP
+    verifyGoogleToken: async (req, res) => {
+        const { idToken } = req.body; // Nhận idToken từ body của request POST
+
+        if (!idToken) {
+            return res.status(400).json({ message: "ID token is required." });
+        }
+
+        try {
+            // Xác thực token với Google
+            const ticket = await client.verifyIdToken({
+                idToken: idToken,
+                audience: process.env.GOOGLE_CLIENT_ID, // Web Client ID
+            });
+            const payload = ticket.getPayload();
+            
+            // Lấy thông tin người dùng từ payload
+            const { sub: googleId, email, name, picture } = payload;
+
+            // Tìm hoặc tạo người dùng trong cơ sở dữ liệu của bạn
+            let user = await User.findOne({ googleId: googleId });
+
+            if (!user) {
+                // Kiểm tra xem email đã tồn tại với tài khoản thường chưa
+                user = await User.findOne({ email: email });
+                if (user) {
+                    // Nếu có, liên kết tài khoản
+                    user.googleId = googleId;
+                    // (Tùy chọn) Cập nhật tên và ảnh đại diện
+                    user.fullname = user.fullname || name;
+                    user.avatar = user.avatar || picture;
+                    await user.save();
+                } else {
+                    // Nếu không, tạo người dùng mới
+                    user = await new User({
+                        googleId: googleId,
+                        email: email,
+                        fullname: name,
+                        avatar: picture,
+                        // Mật khẩu có thể để trống vì họ đăng nhập qua Google
+                    }).save();
+                }
+            }
+
+            // Tạo Access Token và Refresh Token của riêng bạn
+            const accessToken = authController.generateAccessToken(user);
+            const refreshToken = authController.generateRefreshToken(user);
+            // (Bạn có thể lưu refreshToken vào cookie hoặc gửi về client)
+
+            const { password, ...userWithoutPassword } = user._doc;
+            
+            // Trả về thông tin người dùng và token cho mobile app
+            res.status(200).json({ 
+                message: "Google sign-in successful",
+                user: userWithoutPassword, 
+                accessToken: accessToken 
+            });
+
+        } catch (error) {
+            console.error("Google token verification failed:", error);
+            res.status(401).json({ message: "Invalid Google token." });
+        }
+    },
 };
 
 module.exports = authController;
