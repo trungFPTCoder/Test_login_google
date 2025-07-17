@@ -1,74 +1,81 @@
+// ✅ BẮT BUỘC: Đặt dòng này lên đầu tiên để nạp biến môi trường
+require('dotenv').config();
+
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const passport = require('passport');
 const User = require('../models/User');
 const { OAuth2Client } = require('google-auth-library');
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
+// --- HÀM TIỆN ÍCH TÁI SỬ DỤNG ---
+
 /**
- * ✅ HÀM MỚI: Được Passport-Google-Strategy gọi sau khi xác thực thành công.
- * Tìm user trong CSDL bằng googleId, nếu không có thì tạo mới.
- * (Hàm này được export để index.js có thể import và sử dụng)
+ * ✅ HÀM TRUNG TÂM: Tìm user bằng googleId hoặc email, hoặc tạo mới.
+ * Hàm này được tái sử dụng cho cả luồng web (Passport) và mobile (verifyIdToken).
+ * @param {object} profile - Object chứa thông tin user từ Google.
+ * @param {string} profile.googleId - ID của người dùng từ Google.
+ * @param {string} profile.email - Email của người dùng.
+ * @param {string} profile.fullname - Tên đầy đủ của người dùng.
+ * @param {string} profile.avatar - URL ảnh đại diện.
+ * @returns {Promise<User>} - Trả về một user document từ Mongoose.
  */
-exports.findOrCreateUser = async (accessToken, refreshToken, profile, done) => {
-  try {
-    // Tìm user dựa trên googleId
-    let user = await User.findOne({ googleId: profile.id });
-
+const findOrCreateUserFromGoogle = async (profile) => {
+    // 1. Tìm user dựa trên googleId
+    let user = await User.findOne({ googleId: profile.googleId });
     if (user) {
-      return done(null, user); // ✅ Nếu tìm thấy, trả về user đó
+        return user;
     }
 
-    // Nếu không tìm thấy, kiểm tra xem có email đó chưa để liên kết
-    user = await User.findOne({ email: profile.emails[0].value });
+    // 2. Nếu không có, tìm dựa trên email để liên kết tài khoản đã có
+    user = await User.findOne({ email: profile.email });
     if (user) {
-        user.googleId = profile.id;
-        user.avatar = user.avatar || profile.photos[0].value; // Cập nhật avatar nếu chưa có
-        user.isVerified = true;
+        user.googleId = profile.googleId;
+        user.avatar = user.avatar || profile.avatar; // Chỉ cập nhật avatar nếu chưa có
+        user.isVerified = true; // Email từ Google mặc định đã xác thực
         await user.save();
-        return done(null, user);
+        return user;
     }
 
-    // Nếu không có cả googleId và email, tạo user mới
+    // 3. Nếu không có cả hai, tạo một user hoàn toàn mới
     const newUser = new User({
-      googleId: profile.id,
-      fullname: profile.displayName,
-      email: profile.emails[0].value,
-      avatar: profile.photos[0].value,
-      isVerified: true, // Email từ Google đã được xác thực
+        googleId: profile.googleId,
+        fullname: profile.fullname,
+        email: profile.email,
+        avatar: profile.avatar,
+        isVerified: true,
+        password: null, // Không có mật khẩu vì đăng nhập qua Google
     });
     
     await newUser.save();
-    done(null, newUser);
-  } catch (error) {
-    done(error, null);
-  }
+    return newUser;
 };
+
+// --- HÀM EXPORT CHO PASSPORT STRATEGY ---
 
 /**
- * ✅ HÀM MỚI: Được gọi sau khi passport.authenticate trong route callback thành công.
- * Tạo JWT và chuyển hướng người dùng về ứng dụng client với token.
+ * ✅ HÀM CHO PASSPORT: Được gọi bởi GoogleStrategy sau khi Google xác thực thành công.
+ * Nhiệm vụ chính là chuẩn hóa profile và gọi hàm findOrCreateUserFromGoogle.
  */
-exports.googleCallback = (req, res) => {
-  // Passport đã xác thực thành công và gắn user vào req.user
-  const user = req.user; 
-  const accessToken = jwt.sign({ id: user.id, admin: user.admin }, process.env.JWT_ACCESS_KEY, { expiresIn: '1d' });
-
-  // Chuẩn bị thông tin trả về cho client
-  const { password, ...userWithoutPassword } = user._doc;
-  const userString = encodeURIComponent(JSON.stringify(userWithoutPassword));
-  
-  // Chuyển hướng về app với token và thông tin user
-  const redirectUrl = `${process.env.DEEP_LINK_SCHEME}login?token=${accessToken}&user=${userString}`;
-  
-  console.log(`🚀 Redirecting user ${user.email} to deep link...`);
-  res.redirect(redirectUrl);
+const findOrCreateUserForPassport = async (accessToken, refreshToken, profile, done) => {
+    try {
+        const userProfile = {
+            googleId: profile.id,
+            email: profile.emails[0].value,
+            fullname: profile.displayName,
+            avatar: profile.photos[0].value,
+        };
+        const user = await findOrCreateUserFromGoogle(userProfile);
+        // Trả về user cho Passport để Passport gắn vào req.user
+        return done(null, user);
+    } catch (error) {
+        return done(error, null);
+    }
 };
 
+// --- CONTROLLER CHÍNH ---
 
-// --- Controller chính ---
 const authController = {
-    //REGISTER
+    // REGISTER (Email & Password)
     registerUser: async (req, res) => {
         const { fullname, email, password } = req.body;
         try {
@@ -79,9 +86,9 @@ const authController = {
             const salt = await bcrypt.genSalt(10);
             const hashedPassword = await bcrypt.hash(password, salt);
             const newUser = new User({
-                fullname: fullname,
+                fullname,
+                email,
                 password: hashedPassword,
-                email: email,
             });
             const user = await newUser.save();
             const { password: _, ...userWithoutPassword } = user._doc;
@@ -92,7 +99,7 @@ const authController = {
         }
     },
 
-    //LOGIN
+    // LOGIN (Email & Password)
     loginUser: async (req, res) => {
         try {
             const user = await User.findOne({ email: req.body.email });
@@ -110,6 +117,7 @@ const authController = {
             const accessToken = authController.generateAccessToken(user);
             const refreshToken = authController.generateRefreshToken(user);
 
+            // Gửi refresh token trong httpOnly cookie để bảo mật
             res.cookie('refreshToken', refreshToken, {
                 httpOnly: true,
                 secure: process.env.NODE_ENV === 'production',
@@ -122,26 +130,45 @@ const authController = {
             res.status(500).json({ error: error.message });
         }
     },
-    
-    // --- GOOGLE AUTH LOGIC (Đã được tích hợp vào đây) ---
-    googleLogin: passport.authenticate('google', { 
-      scope: ['profile', 'email'],
-      session: false 
-    }),
 
-    googleCallback: (req, res) => {
-      passport.authenticate('google', { session: false, failureRedirect: '/login-failed' }, (err, user, info) => {
-        if (err || !user) {
-          return res.redirect(`${process.env.DEEP_LINK_SCHEME}login?error=AuthenticationFailed`);
+    // ✅ VERIFY GOOGLE TOKEN (Mobile Flow)
+    verifyGoogleToken: async (req, res) => {
+        const { idToken } = req.body;
+        if (!idToken) {
+            return res.status(400).json({ message: "ID token is required." });
         }
-    
-        const token = authController.generateAccessToken(user);
-        const { password, ...userWithoutPassword } = user._doc;
-        const userString = encodeURIComponent(JSON.stringify(userWithoutPassword));
-        
-        console.log(`🚀 Redirecting to deep link with token...`);
-        res.redirect(`${process.env.DEEP_LINK_SCHEME}login?token=${token}&user=${userString}`);
-      })(req, res);
+        try {
+            // Xác thực token với Google
+            const ticket = await client.verifyIdToken({
+                idToken,
+                audience: process.env.GOOGLE_CLIENT_ID,
+            });
+            const payload = ticket.getPayload();
+            
+            // Chuẩn hóa profile để gọi hàm tái sử dụng
+            const userProfile = {
+                googleId: payload.sub,
+                email: payload.email,
+                fullname: payload.name,
+                avatar: payload.picture,
+            };
+
+            // ✅ Gọi hàm tái sử dụng
+            const user = await findOrCreateUserFromGoogle(userProfile);
+
+            // Tạo token và trả về cho client
+            const accessToken = authController.generateAccessToken(user);
+            const { password, ...userWithoutPassword } = user._doc;
+            
+            res.status(200).json({ 
+                message: "Google sign-in successful",
+                user: userWithoutPassword, 
+                accessToken: accessToken 
+            });
+        } catch (error) {
+            console.error("Google token verification failed:", error);
+            res.status(401).json({ message: "Invalid Google token." });
+        }
     },
 
     // --- TOKEN GENERATION & MANAGEMENT ---
@@ -175,75 +202,7 @@ const authController = {
         res.clearCookie('refreshToken');
         res.status(200).json("Logged out successfully!");
     },
-    // ✅ HÀM MỚI: XÁC THỰC ID TOKEN TỪ MOBILE APP
-    verifyGoogleToken: async (req, res) => {
-        const { idToken } = req.body; // Nhận idToken từ body của request POST
-
-        if (!idToken) {
-            return res.status(400).json({ message: "ID token is required." });
-        }
-
-        try {
-            // Xác thực token với Google
-            const ticket = await client.verifyIdToken({
-                idToken: idToken,
-                audience: process.env.GOOGLE_CLIENT_ID, // Web Client ID
-            });
-            const payload = ticket.getPayload();
-            
-            // Lấy thông tin người dùng từ payload
-            const { sub: googleId, email, name, picture } = payload;
-
-            // Tìm hoặc tạo người dùng trong cơ sở dữ liệu của bạn
-            let user = await User.findOne({ googleId: googleId });
-
-            if (!user) {
-                // Kiểm tra xem email đã tồn tại với tài khoản thường chưa
-                user = await User.findOne({ email: email });
-                if (user) {
-                    // Nếu có, liên kết tài khoản
-                    user.googleId = googleId;
-                    // (Tùy chọn) Cập nhật tên và ảnh đại diện
-                    user.fullname = user.fullname || name;
-                    user.avatar = user.avatar || picture;
-                    await user.save();
-                } else {
-                    // Nếu không, tạo người dùng mới
-                    user = await new User({
-                        googleId: googleId,
-                        email: email,
-                        fullname: name,
-                        avatar: picture,
-                        // Mật khẩu có thể để trống vì họ đăng nhập qua Google
-                    }).save();
-                }
-            }
-
-            // Tạo Access Token và Refresh Token của riêng bạn
-            const accessToken = authController.generateAccessToken(user);
-            const refreshToken = authController.generateRefreshToken(user);
-            // (Bạn có thể lưu refreshToken vào cookie hoặc gửi về client)
-
-            const { password, ...userWithoutPassword } = user._doc;
-            
-            // Trả về thông tin người dùng và token cho mobile app
-            res.status(200).json({ 
-                message: "Google sign-in successful",
-                user: userWithoutPassword, 
-                accessToken: accessToken 
-            });
-
-        } catch (error) {
-            console.error("Google token verification failed:", error);
-            res.status(401).json({ message: "Invalid Google token." });
-        }
-    },
 };
 
-
-// ✅ Ghép các hàm đã export ở trên vào object authController để có thể gọi từ route
-// Điều này giúp giữ cấu trúc code của bạn mà vẫn tách bạch được logic
-authController.findOrCreateUser = exports.findOrCreateUser;
-authController.googleCallback = exports.googleCallback;
-
-module.exports = authController;
+// Export controller chính và hàm cho Passport
+module.exports = { authController, findOrCreateUserForPassport };

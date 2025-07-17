@@ -6,12 +6,10 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const passport = require('passport');
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
-const session = require("express-session"); // ✅ Thêm express-session
 const os = require('os');
 
-// Import models & controllers cần thiết cho Passport
-const User = require('./models/User'); // ✅ Cần User model
-const { findOrCreateUser } = require('./controllers/authControllers'); // ✅ Import hàm logic
+// ✅ Import hàm xử lý logic cho Passport từ controller đã được tái cấu trúc
+const { findOrCreateUserForPassport } = require('./controllers/authControllers');
 
 // Import các routes
 const authRoutes = require('./Route/auth');
@@ -35,60 +33,27 @@ connectToMongo();
 
 // --- MIDDLEWARE ---
 app.use(cors());
-// ✅ Bỏ cookieParser vì express-session đã xử lý session cookie
 app.use(express.json());
 
-// ✅ Cấu hình session, phải nằm trước passport.initialize()
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET, // Thêm dòng này vào file .env
-    resave: false,
-    saveUninitialized: true,
-  })
-);
-
-// ✅ Khởi tạo passport và passport session
+// ✅ Khởi tạo passport (Không cần session)
 app.use(passport.initialize());
-app.use(passport.session());
-    // ✅ THÊM ĐOẠN NÀY ĐỂ DEBUG
-    const callbackURLForDebug = `${process.env.BACKEND_URL}/v1/auth/google/callback`;
-    console.log("--- DEBUG: PASSPORT IS USING THIS CALLBACK URL ---");
-    console.log(callbackURLForDebug);
-    console.log("------------------------------------------------");
 
 // --- CẤU HÌNH PASSPORT ---
-// ✅ Toàn bộ cấu hình Passport nên đặt ở file server chính cho rõ ràng
-
-// Cấu hình chiến lược Google OAuth
+// Cấu hình chiến lược Google OAuth, sử dụng hàm logic đã import
 passport.use(
-  new GoogleStrategy(
-    {
-      clientID: process.env.GOOGLE_CLIENT_ID,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      callbackURL: `${process.env.BACKEND_URL}/v1/auth/google/callback`, // ✅ Đảm bảo URL này khớp với route
-    },
-    findOrCreateUser // ✅ Hàm xử lý logic sau khi xác thực thành công
-  )
+    new GoogleStrategy(
+        {
+            clientID: process.env.GOOGLE_CLIENT_ID,
+            clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+            callbackURL: `${process.env.BACKEND_URL}/v1/auth/google/callback`,
+        },
+        findOrCreateUserForPassport // ✅ Hàm xử lý logic nhất quán
+    )
 );
 
-// Lưu ID người dùng vào session
-passport.serializeUser((user, done) => {
-  done(null, user.id);
-});
-
-// Lấy thông tin người dùng từ ID trong session
-passport.deserializeUser(async (id, done) => {
-  try {
-    const user = await User.findById(id);
-    done(null, user);
-  } catch (error) {
-    done(error, null);
-  }
-});
-
+// ✅ Không cần `passport.serializeUser` và `passport.deserializeUser` vì không dùng session.
 
 // --- ROUTES ---
-// ✅ Đổi tên route cho giống của thầy và để client dễ gọi
 app.use("/v1/auth", authRoutes); 
 app.use("/v1/products", productRoutes);
 app.use("/v1/comments", commentRoutes);
