@@ -1,45 +1,70 @@
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const passport = require('passport');
-const GoogleStrategy = require('passport-google-oauth20').Strategy;
-const User = require('../models/User'); // Đảm bảo đường dẫn đúng
+const User = require('../models/User');
 const { OAuth2Client } = require('google-auth-library');
-const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID); 
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
+/**
+ * ✅ HÀM MỚI: Được Passport-Google-Strategy gọi sau khi xác thực thành công.
+ * Tìm user trong CSDL bằng googleId, nếu không có thì tạo mới.
+ * (Hàm này được export để index.js có thể import và sử dụng)
+ */
+exports.findOrCreateUser = async (accessToken, refreshToken, profile, done) => {
+  try {
+    // Tìm user dựa trên googleId
+    let user = await User.findOne({ googleId: profile.id });
 
-// --- Cấu hình Passport.js với chiến lược Google ---
-// Phần này sẽ được Node.js thực thi khi module được require, và nó sẽ cấu hình passport.
-passport.use(new GoogleStrategy({
-    clientID: process.env.GOOGLE_CLIENT_ID,
-    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    callbackURL: `${process.env.BACKEND_URL}${process.env.CALLBACK_URL}`
-  },
-  // Hàm này sẽ được gọi sau khi Google xác thực người dùng thành công
-  async (accessToken, refreshToken, profile, done) => {
-    try {
-      // Tìm hoặc tạo người dùng trong database
-      let user = await User.findOne({ googleId: profile.id });
-      if (!user) {
-        user = await User.findOne({ email: profile.emails[0].value });
-        if (user) {
-          // Liên kết tài khoản nếu đã có email
-          user.googleId = profile.id;
-          await user.save();
-        } else {
-          // Tạo người dùng mới
-          user = await new User({
-            googleId: profile.id,
-            fullname: profile.displayName,
-            email: profile.emails[0].value,
-          }).save();
-        }
-      }
-      return done(null, user);
-    } catch (error) {
-      return done(error, null);
+    if (user) {
+      return done(null, user); // ✅ Nếu tìm thấy, trả về user đó
     }
+
+    // Nếu không tìm thấy, kiểm tra xem có email đó chưa để liên kết
+    user = await User.findOne({ email: profile.emails[0].value });
+    if (user) {
+        user.googleId = profile.id;
+        user.avatar = user.avatar || profile.photos[0].value; // Cập nhật avatar nếu chưa có
+        user.isVerified = true;
+        await user.save();
+        return done(null, user);
+    }
+
+    // Nếu không có cả googleId và email, tạo user mới
+    const newUser = new User({
+      googleId: profile.id,
+      fullname: profile.displayName,
+      email: profile.emails[0].value,
+      avatar: profile.photos[0].value,
+      isVerified: true, // Email từ Google đã được xác thực
+    });
+    
+    await newUser.save();
+    done(null, newUser);
+  } catch (error) {
+    done(error, null);
   }
-));
+};
+
+/**
+ * ✅ HÀM MỚI: Được gọi sau khi passport.authenticate trong route callback thành công.
+ * Tạo JWT và chuyển hướng người dùng về ứng dụng client với token.
+ */
+exports.googleCallback = (req, res) => {
+  // Passport đã xác thực thành công và gắn user vào req.user
+  const user = req.user; 
+  const accessToken = jwt.sign({ id: user.id, admin: user.admin }, process.env.JWT_ACCESS_KEY, { expiresIn: '1d' });
+
+  // Chuẩn bị thông tin trả về cho client
+  const { password, ...userWithoutPassword } = user._doc;
+  const userString = encodeURIComponent(JSON.stringify(userWithoutPassword));
+  
+  // Chuyển hướng về app với token và thông tin user
+  const redirectUrl = `${process.env.DEEP_LINK_SCHEME}login?token=${accessToken}&user=${userString}`;
+  
+  console.log(`🚀 Redirecting user ${user.email} to deep link...`);
+  res.redirect(redirectUrl);
+};
+
 
 // --- Controller chính ---
 const authController = {
@@ -214,5 +239,11 @@ const authController = {
         }
     },
 };
+
+
+// ✅ Ghép các hàm đã export ở trên vào object authController để có thể gọi từ route
+// Điều này giúp giữ cấu trúc code của bạn mà vẫn tách bạch được logic
+authController.findOrCreateUser = exports.findOrCreateUser;
+authController.googleCallback = exports.googleCallback;
 
 module.exports = authController;
