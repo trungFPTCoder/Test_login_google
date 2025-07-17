@@ -50,7 +50,11 @@ app.use(
 // ✅ Khởi tạo passport và passport session
 app.use(passport.initialize());
 app.use(passport.session());
-
+    // ✅ THÊM ĐOẠN NÀY ĐỂ DEBUG
+    const callbackURLForDebug = `${process.env.BACKEND_URL}/v1/auth/google/callback`;
+    console.log("--- DEBUG: PASSPORT IS USING THIS CALLBACK URL ---");
+    console.log(callbackURLForDebug);
+    console.log("------------------------------------------------");
 
 // --- CẤU HÌNH PASSPORT ---
 // ✅ Toàn bộ cấu hình Passport nên đặt ở file server chính cho rõ ràng
